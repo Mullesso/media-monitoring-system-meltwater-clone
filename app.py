@@ -25,9 +25,23 @@ import pandas as pd
 import requests
 import streamlit as st
 from newspaper import Article
-from goose3 import Goose  # fallback article extractor (Apache-2.0 licensed)
-from readability import Document  # final fallback article extractor (Apache‑licensed)
-from bs4 import BeautifulSoup  # used to convert readability HTML into plain text
+
+# Optional extractors: Goose3 and readability‑lxml provide additional scraping
+# resilience but may not always be installed.  We import them lazily in
+# ``scrape_article()`` so that the absence of these packages does not crash
+# the application at startup.  If they are unavailable, the function simply
+# skips their usage.
+try:
+    from goose3 import Goose  # type: ignore[import-not-found]
+except ImportError:
+    Goose = None  # type: ignore[assignment]
+
+try:
+    from readability import Document  # type: ignore[import-not-found]
+    from bs4 import BeautifulSoup  # type: ignore[import-not-found]
+except ImportError:
+    Document = None  # type: ignore[assignment]
+    BeautifulSoup = None  # type: ignore[assignment]
 import feedparser
 import nltk
 
@@ -255,30 +269,34 @@ def scrape_article(url: str) -> Tuple[str, datetime.datetime]:
             return text, date
     except Exception:
         pass
-    # Fallback to Goose3
-    try:
-        g = Goose({"browser_user_agent": "Mozilla/5.0"})
-        content = g.extract(url=url)
-        text = getattr(content, "cleaned_text", "") or ""
-        date = getattr(content, "publish_date", None)
-        if text:
-            return text, date
-    except Exception:
-        pass
-    # Final fallback to readability-lxml
-    try:
-        resp = requests.get(url, timeout=15)
-        resp.raise_for_status()
-        doc = Document(resp.text)
-        # ``summary()`` returns HTML containing the main content【842996678366491†L94-L126】
-        html_content = doc.summary()  # type: ignore[attr-defined]
-        soup = BeautifulSoup(html_content, "html.parser")
-        # Extract plain text from the HTML
-        text = soup.get_text(separator="\n").strip()
-        # readability-lxml does not provide a publish date; return None
-        return text, None
-    except Exception:
-        return "", None
+    # Fallback to Goose3, if available
+    if Goose is not None:
+        try:
+            g = Goose({"browser_user_agent": "Mozilla/5.0"})
+            content = g.extract(url=url)
+            text = getattr(content, "cleaned_text", "") or ""
+            date = getattr(content, "publish_date", None)
+            if text:
+                return text, date
+        except Exception:
+            pass
+    # Final fallback to readability-lxml if both readability and BeautifulSoup are available
+    if Document is not None and BeautifulSoup is not None:
+        try:
+            resp = requests.get(url, timeout=15)
+            resp.raise_for_status()
+            doc = Document(resp.text)  # type: ignore[call-arg]
+            # ``summary()`` returns HTML containing the main content【842996678366491†L94-L126】
+            html_content = doc.summary()  # type: ignore[attr-defined]
+            soup = BeautifulSoup(html_content, "html.parser")
+            # Extract plain text from the HTML
+            text = soup.get_text(separator="\n").strip()
+            # readability-lxml does not provide a publish date; return None
+            return text, None
+        except Exception:
+            pass
+    # If all extractors fail or are unavailable, return empty text
+    return "", None
 
 
 def fetch_from_gdelt(query: str, max_records: int = 20) -> List[Dict]:
@@ -400,8 +418,12 @@ def fetch_from_guardian(query: str, api_key: str, page_size: int = 20) -> List[D
         # `trailText` is a short summary; `body` contains HTML of the full article
         fields = item.get("fields", {}) or {}
         html_body = fields.get("body", "")
-        # Convert the HTML body to plain text
-        text = BeautifulSoup(html_body, "html.parser").get_text(separator="\n").strip() if html_body else ""
+        # Convert the HTML body to plain text.  If BeautifulSoup is unavailable,
+        # fall back to returning the raw HTML.
+        if html_body and BeautifulSoup is not None:
+            text = BeautifulSoup(html_body, "html.parser").get_text(separator="\n").strip()
+        else:
+            text = html_body or ""
         description = fields.get("trailText", "")
         articles.append(
             {

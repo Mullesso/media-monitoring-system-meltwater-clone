@@ -1,6 +1,5 @@
 streamlit>=1.33.0
 requests>=2.31.0
-pandas>=2.2.2
 newspaper3k>=0.2.8
 feedparser>=6.0.10
 nltk>=3.8.1

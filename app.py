@@ -122,13 +122,17 @@ def fetch_from_newsapi(query: str, api_key: str, page_size: int = 20, domains: s
     return data.get("articles", [])
 
 
-def fetch_from_google_rss(query: str, limit: int = 20) -> List[Dict]:
+def fetch_from_google_rss(query: str, limit: int = 20, *, hl: str | None = None, gl: str | None = None, ceid: str | None = None) -> List[Dict]:
     """Fetch news items using the Google News RSS feed.
 
-    Google publishes RSS feeds for arbitrary search queries.  You can
-    retrieve up to a specified number of entries per keyword.  See
-    https://news.google.com/rss/search?q=<SEARCH_QUERY> for details
-    about how the RSS feed works【739508586957365†L26-L40】.
+    Google publishes RSS feeds for arbitrary search queries.  This helper
+    supports optional regional parameters to restrict results to a specific
+    country or language.  The `hl` parameter controls the UI language (e.g.
+    ``en-GB``), `gl` sets the geolocation (e.g. ``GB``), and `ceid`
+    combines country and language (e.g. ``GB:en``).  These parameters are
+    optional and only added to the feed URL when provided.  See
+    https://news.google.com/rss/search?q=<SEARCH_QUERY> for details about how
+    the RSS feed works【739508586957365†L26-L40】.
 
     Parameters
     ----------
@@ -136,6 +140,12 @@ def fetch_from_google_rss(query: str, limit: int = 20) -> List[Dict]:
         Search string for the RSS feed.  Spaces are URL‑encoded.
     limit : int, optional
         Maximum number of entries to return per feed (default is 20).
+    hl : str, optional
+        UI language code (e.g., ``en-GB``).  Only used when provided.
+    gl : str, optional
+        Geolocation country code (e.g., ``GB``).  Only used when provided.
+    ceid : str, optional
+        Combined country and language (e.g., ``GB:en``).  Only used when provided.
 
     Returns
     -------
@@ -143,7 +153,18 @@ def fetch_from_google_rss(query: str, limit: int = 20) -> List[Dict]:
         A list of dictionaries with similar keys to NewsAPI results.
     """
     encoded = urllib.parse.quote(query)
+    # Start with the base search URL
     feed_url = f"https://news.google.com/rss/search?q={encoded}"
+    # Append optional regional parameters if provided
+    params = []
+    if hl:
+        params.append(f"hl={urllib.parse.quote(hl)}")
+    if gl:
+        params.append(f"gl={urllib.parse.quote(gl)}")
+    if ceid:
+        params.append(f"ceid={urllib.parse.quote(ceid)}")
+    if params:
+        feed_url = f"{feed_url}&{'&'.join(params)}"
     feed = feedparser.parse(feed_url)
     entries = feed.entries[:limit]
     articles: List[Dict] = []
@@ -169,7 +190,16 @@ def fetch_from_google_rss(query: str, limit: int = 20) -> List[Dict]:
     return articles
 
 
-def fetch_from_google_site_search(query: str, domain: str, days: int = 7, limit: int = 20) -> List[Dict]:
+def fetch_from_google_site_search(
+    query: str,
+    domain: str,
+    days: int = 7,
+    limit: int = 20,
+    *,
+    hl: str | None = None,
+    gl: str | None = None,
+    ceid: str | None = None,
+) -> List[Dict]:
     """Fetch news items from a specific website using Google News RSS.
 
     Google News RSS supports advanced search operators such as `site:` and
@@ -202,7 +232,7 @@ def fetch_from_google_site_search(query: str, domain: str, days: int = 7, limit:
     # Build the search string.  The `site:` operator restricts results to
     # the given domain, and the `when:` operator restricts the time window
     # (e.g., 7d for the last seven days)【168391965472992†L183-L221】.
-    parts = []
+    parts: List[str] = []
     if query:
         parts.append(query.strip())
     if domain:
@@ -210,7 +240,8 @@ def fetch_from_google_site_search(query: str, domain: str, days: int = 7, limit:
     if days:
         parts.append(f"when:{days}d")
     search_str = " ".join(parts)
-    return fetch_from_google_rss(search_str, limit=limit)
+    # Delegate to the RSS fetcher, forwarding any regional parameters
+    return fetch_from_google_rss(search_str, limit=limit, hl=hl, gl=gl, ceid=ceid)
 
 
 def scrape_article(url: str) -> Tuple[str, datetime.datetime]:
@@ -550,178 +581,144 @@ def main() -> None:
     except LookupError:
         nltk.download("punkt", quiet=True)
 
-    st.set_page_config(page_title="Media Monitoring System", layout="wide")
-    st.title("Media Monitoring System – Meltwater Clone")
+    # Configure the page and present a simplified search interface similar to
+    # the Clippings dashboard.  Users enter a single client or topic and click
+    # "Search" to fetch a report.  A UK coverage toggle is provided as a
+    # placeholder but is not currently enforced.
+    st.set_page_config(page_title="Media Monitoring Dashboard", layout="wide")
+    st.title("Clippings‑style Media Monitoring Dashboard")
 
-    # Sidebar inputs
-    st.sidebar.header("Search Settings")
-    keyword_input = st.sidebar.text_input(
-        "Enter keywords or company names (comma separated)",
-        value="AI startups, Fintech, mergers and acquisitions"
+    query = st.text_input(
+        "Which client or topic needs a report?",
+        value="",
+        placeholder="Enter a company, person or keyword"
     )
-    max_articles = st.sidebar.slider(
-        "Maximum articles per keyword or site",
-        min_value=5,
-        max_value=50,
-        value=20
-    )
-    # Allow users to specify either raw domains (e.g. reuters.com) or
-    # human‑readable publication names (e.g. The Times, Daily Mail).  If
-    # names are supplied, they will be looked up in the ``PUBLICATION_DOMAINS``
-    # mapping to derive the corresponding domain(s).  You can combine
-    # publication names and domains in the same comma‑separated string.
-    domains_input = st.sidebar.text_input(
-        "Restrict to specific domains or publications (comma separated, optional)",
-        value=""
-    )
-    if st.sidebar.button("Search"):
-        run_monitoring(keyword_input, max_articles, domains_input)
-
-    # Do not automatically run a search on page load.  Users must click
-    # the "Search" button after entering their keywords or domains.  This
-    # avoids making unnecessary API requests before the user is ready.
+    uk_only = st.checkbox("UK coverage only", value=False)
+    # Fixed number of articles per search for simplicity
+    max_articles = 20
+    if st.button("Search"):
+        if query.strip():
+            # Pass the UK toggle to the monitoring function.  Domain filtering is
+            # not exposed in this simplified interface; to target specific
+            # publications, users can enter domain names directly in the
+            # keywords field using the ``site:`` syntax (e.g., "site:ft.com").
+            run_monitoring(query, max_articles, "", uk_only)
+        else:
+            st.warning("Please enter at least one keyword or company name.")
 
 
-def run_monitoring(query_string: str, max_articles: int, domains_input: str = "") -> None:
+def run_monitoring(
+    query_string: str,
+    max_articles: int,
+    domains_input: str = "",
+    uk_only: bool = False,
+) -> None:
     """Run the monitoring process for a given set of queries.
 
-    This function performs the actual retrieval, scraping and prioritisation of
-    articles.  It writes results into the Streamlit app, including a table of
-    articles and the full text for each selected article.
+    The simplified monitor retrieves all articles via Google News RSS.  Domain
+    restrictions are respected using the ``site:`` operator, and users may
+    optionally restrict results to UK publications via the ``uk_only`` flag.
+    Articles are scraped for full text, scored and displayed in a card‑style
+    layout.
 
     Parameters
     ----------
     query_string : str
-        Comma‑separated keywords or company names.
+        Comma‑separated keywords or company names to search for.
     max_articles : int
         Maximum number of articles to retrieve per keyword.
+    domains_input : str, optional
+        Comma‑separated list of publication names or domains to restrict the
+        search to.  Names are mapped to domains using ``PUBLICATION_DOMAINS``.
+    uk_only : bool, optional
+        If True, restrict Google News results to UK sources by passing
+        language and country parameters to the RSS feed.  Default is False.
     """
     with st.spinner("Fetching news articles…"):
         queries = [q.strip() for q in query_string.split(",") if q.strip()]
-        # Load API keys from Streamlit secrets or environment variables
-        news_api_key: str | None = None
-        guardian_key: str | None = None
-        if hasattr(st, "secrets"):
-            news_api_key = st.secrets.get("NEWS_API_KEY")
-            guardian_key = st.secrets.get("GUARDIAN_API_KEY")
-        # Fallback to environment variables if secrets not configured
-        news_api_key = news_api_key or os.getenv("NEWS_API_KEY")
-        guardian_key = guardian_key or os.getenv("GUARDIAN_API_KEY")
-
-        if not news_api_key:
-            st.info(
-                "No NEWS_API_KEY found.  The app will use the public Google News RSS feed instead, which may return limited and delayed results.\n"
-                "To receive more comprehensive coverage, create a free account on NewsAPI.org and add your key to the Streamlit secrets as 'NEWS_API_KEY'."
-            )
-        if not guardian_key:
-            st.info(
-                "No GUARDIAN_API_KEY provided.  To include The Guardian's archive and full article texts in search results, register for a free developer key on The Guardian Open Platform and add it as 'GUARDIAN_API_KEY' in your secrets."
-            )
-
         all_articles: List[Dict] = []
         # Parse any domain restrictions or publication names from the argument.
-        # For each comma‑separated token, check if it matches a key in
-        # ``PUBLICATION_DOMAINS``.  If so, extend the domain list with all
-        # associated domains; otherwise assume the token itself is a domain.
         domain_list: List[str] = []
         for token in [d.strip() for d in domains_input.split(",") if d.strip()]:
             key = token.lower()
             if key in PUBLICATION_DOMAINS:
                 domain_list.extend(PUBLICATION_DOMAINS[key])
             else:
-                # Accept bare domains like "reuters.com" or names not in mapping
                 domain_list.append(token)
         # Remove duplicates while preserving order
         seen: set[str] = set()
         domain_list = [d for d in domain_list if not (d in seen or seen.add(d))]
+        # Determine regional parameters based on UK coverage toggle
+        if uk_only:
+            hl = "en-GB"
+            gl = "GB"
+            ceid = "GB:en"
+        else:
+            hl = None
+            gl = None
+            ceid = None
+        # Retrieve articles for each query
         for q in queries:
-            # Prefer NewsAPI when a key is available; otherwise fall back to RSS
-            if news_api_key:
-                # If a domain list is provided, join into a comma‑separated string
-                # for the NewsAPI "domains" parameter.  Otherwise pass None.
-                dom_param = ",".join(domain_list) if domain_list else None
-                articles = fetch_from_newsapi(q, news_api_key, page_size=max_articles, domains=dom_param)
-            else:
-                articles = fetch_from_google_rss(q, limit=max_articles)
+            # General Google News search
+            articles = fetch_from_google_rss(q, limit=max_articles, hl=hl, gl=gl, ceid=ceid)
             all_articles.extend(articles)
-            # If domains have been specified, query Google News RSS for each domain with site restriction
+            # Additional site‑specific searches
             for domain in domain_list:
-                site_articles = fetch_from_google_site_search(q, domain, days=7, limit=max_articles)
+                site_articles = fetch_from_google_site_search(
+                    q,
+                    domain,
+                    days=7,
+                    limit=max_articles,
+                    hl=hl,
+                    gl=gl,
+                    ceid=ceid,
+                )
                 all_articles.extend(site_articles)
-            # Query the Guardian API if a key is available
-            if guardian_key:
-                guardian_articles = fetch_from_guardian(q, guardian_key, page_size=max_articles)
-                all_articles.extend(guardian_articles)
-            # Also query the GDELT DOC 2.0 API for broader coverage
-            gdelt_articles = fetch_from_gdelt(q, max_records=max_articles)
-            all_articles.extend(gdelt_articles)
-
         if not all_articles:
             st.warning("No articles were found for the specified queries.")
             return
-
-        # Optionally scrape the full content and update publishedAt if missing
-        scraped_results = []
+        # Scrape and update publication dates
+        scraped_results: List[Dict] = []
         for art in all_articles:
             url = art.get("url")
-            # Use existing content if provided by API (e.g., Guardian); otherwise scrape
+            # Use existing content if provided (should be rare with RSS)
             if art.get("content"):
                 text = art["content"]
                 pub_date = None
             else:
                 text, pub_date = scrape_article(url) if url else ("", None)
-            # If the article had no publication date from the API but scraping succeeded, update it
+            # Update missing publication date using scraped metadata
             if not art.get("publishedAt") and pub_date:
-                # Only call isoformat() on objects that implement it.  Some
-                # extractors may return dates as strings or None.  Convert
-                # non‑datetime values to strings gracefully【no citation】.
                 if hasattr(pub_date, "isoformat"):
                     art["publishedAt"] = pub_date.isoformat()
                 else:
                     art["publishedAt"] = str(pub_date)
             art["content"] = text
             scraped_results.append(art)
-
         prioritised = prioritise_articles(scraped_results)
-
         # Display results
-        df = pd.DataFrame([
-            {
-                "Priority Score": round(a["priority"], 3),
-                "Recency": round(a["recency"], 3),
-                "Authority": round(a["authority"], 3),
-                "Date": a.get("publishedAt"),
-                "Source": a.get("source", {}).get("name"),
-                "Title": a.get("title"),
-                "URL": a.get("url"),
-            }
-            for a in prioritised
-        ])
         st.subheader("Results")
-        st.markdown("**Articles are prioritised by recency and source authority.** Use the column headers to sort.")
-        st.dataframe(df, use_container_width=True)
-
-        # Show details of top article or selected row
-        st.subheader("Article Details")
-        selected_index = st.number_input(
-            "Select an article to view details (0 = first article)",
-            min_value=0,
-            max_value=len(prioritised) - 1,
-            value=0,
-            step=1,
-            format="%i"
-        )
-        selected = prioritised[int(selected_index)]
-        st.markdown(f"### {selected.get('title')}")
-        st.markdown(f"**Source:** {selected.get('source', {}).get('name')}  ")
-        st.markdown(f"**Published:** {selected.get('publishedAt')}  ")
-        st.markdown(f"**URL:** [{selected.get('url')}]({selected.get('url')})")
-        if selected.get("content"):
-            st.markdown("#### Full Text")
-            st.write(selected["content"])
-        else:
-            st.info("Full text could not be extracted from this article.\n"
-                    "Try clicking the URL above to read the article at the source.")
+        if not prioritised:
+            st.info("No articles were found for the specified queries.")
+            return
+        display_count = min(len(prioritised), max_articles)
+        for idx, art in enumerate(prioritised[:display_count], start=1):
+            title = art.get("title") or "Untitled article"
+            source_name = art.get("source", {}).get("name", "Unknown source")
+            header = f"{idx}. {title} — {source_name}"
+            with st.expander(header, expanded=False):
+                pub_date = art.get("publishedAt") or "Unknown date"
+                st.markdown(f"**Published:** {pub_date}")
+                # These scores may not be meaningful for RSS‑only results, but we keep them for sorting
+                st.markdown(
+                    f"**Recency Score:** {round(art.get('recency', 0.0), 2)} | **Authority Score:** {round(art.get('authority', 0.0), 2)} | **Priority:** {round(art.get('priority', 0.0), 2)}"
+                )
+                description = art.get("description") or ""
+                content_excerpt = (art.get("content", "") or "")[:500]
+                snippet = description if description else content_excerpt
+                if snippet:
+                    st.write(snippet.strip() + ("…" if len(snippet) >= 500 else ""))
+                st.markdown(f"[Read full article]({art.get('url')})")
 
 
 if __name__ == "__main__":

@@ -9,27 +9,55 @@ requiring any coding knowledge.
 
 ## Features
 
-* **Automated searching** – the app queries a variety of sources to capture as
-  many relevant stories as possible:
+The current version of the media monitoring dashboard has been streamlined to
+prioritise ease of use and reliability.  It focuses on a single source of
+news, uses a robust multi‑stage scraper and presents results in a clean,
+Clippings‑style interface:
 
-  * **NewsAPI** – if you provide a `NEWS_API_KEY`, the app calls the
-    [NewsAPI](https://newsapi.org) for high‑quality news results; otherwise it
-    falls back to the publicly available Google News RSS feed.  The
-    [Google News RSS format](https://friendlyuser.github.io/posts/tech/net/news_app_csharp/)
-    allows you to search for news articles by keyword by constructing a URL like
-    `https://news.google.com/rss/search?q=YOUR_QUERY`【739508586957365†L26-L40】.
-  * **GDELT** – the app queries the [GDELT DOC 2.0 API](https://api.gdeltproject.org/api/v2/doc/doc) in
-    *artlist* mode, which monitors global news sources in 65 languages and
-    machine‑translates them to English【317432739810327†L52-L63】.  This greatly expands
-    coverage beyond mainstream English‑language outlets.
-  * **The Guardian** – if you supply a `GUARDIAN_API_KEY`, the app calls
-    The Guardian’s Open Platform to retrieve full articles from the Guardian’s
-    archive.  A free developer key grants up to 500 calls per day and includes
-    access to the full body text of each article【666270658916805†L21-L35】.  The API
-    supports the `show-fields=body` filter to return article body text directly
-    【555774334167872†L49-L53】, so there is no need to scrape Guardian pages.
+* **Google News RSS search** – the app retrieves articles from the public
+  [Google News RSS](https://news.google.com/rss) feed for any keyword or
+  phrase.  You can restrict results to UK sources by enabling the “UK
+  coverage only” toggle on the home page.  Internally this sets the
+  appropriate `hl=en-GB`, `gl=GB` and `ceid=GB:en` parameters on the RSS
+  request.  The RSS format allows advanced operators such as `site:` and
+  `when:`【168391965472992†L183-L223】.  For example, entering `site:reuters.com AI
+  startups` searches for “AI startups” articles on Reuters only, while
+  `When:1d Beyonce` finds stories about Beyoncé from the past day.  See
+  Google’s operator reference for more ideas.
 
-  Results from all sources are combined and de‑duplicated before scoring.
+* **Full‑text scraping** – when the RSS feed does not contain the article
+  body, the app downloads each page and extracts the main content using a
+  series of extractors.  It first uses **newspaper3k**, falls back to
+  **goose3** when necessary【275271027204652†L203-L371】 and finally applies **readability‑lxml**
+  with BeautifulSoup【842996678366491†L94-L126】.  This multi‑stage approach
+  maximises the chance of obtaining readable text.
+
+* **Relevance and authority scoring** – each article receives a recency
+  score (fresh stories within seven days score highest) and a source
+  credibility score based on a curated list of reputable outlets.  The
+  News Literacy Project advises evaluating news sources based on standards,
+  transparency and corrections policies【559532761496453†L84-L109】; outlets like Reuters
+  and the BBC score highest in our heuristic.
+
+* **Clean Streamlit dashboard** – the interface features a single
+  search bar inspired by the Clippings design.  Enter a topic, brand or
+  person, enable UK coverage if desired, and click *Search*.  Results are
+  displayed in expandable cards that show the headline, publication date,
+  recency and authority scores, a short excerpt and a link to the full
+  article.
+
+* **Optional domain filtering via search syntax** – rather than exposing a
+  separate domain input, you can restrict results to specific outlets by
+  including their domains directly in the search query using the `site:`
+  operator (e.g., `site:bloomberg.com mergers and acquisitions`).  If you
+  wish to search multiple outlets, separate them with spaces (e.g.,
+  `site:reuters.com site:ft.com fintech`).  Behind the scenes the app uses
+  the Google News RSS feed with your exact search string, so all standard
+  operators are available【168391965472992†L183-L223】.
+
+All results are deduplicated, scraped, scored and presented together.  The
+application no longer depends on external API keys, making setup much
+simpler.
 * **Full‑text scraping** – when an API does not provide full article text,
   the app downloads the page and extracts the main body using a series of
   fallbacks:
@@ -55,28 +83,22 @@ requiring any coding knowledge.
   Literacy Project suggests looking for standards, transparency and
   accountability when vetting a news source【559532761496453†L84-L109】; sources
   such as Reuters, the Associated Press and the BBC rank highest.
-* **Streamlit dashboard** – results are displayed in an interactive table with
-  sortable columns.  You can drill into any article to read the extracted
-  text and link back to the original site.
-* **Customisable keywords** – enter your own topics, company names or phrases in
-  the sidebar separated by commas.  Adjust the number of articles per
-  keyword with a slider.
-* **Domain and publication filtering** – optionally restrict searches to specific
-  news outlets by entering either domain names (e.g., `reuters.com,bloomberg.com`) or
-  human‑readable publication names (e.g., `The Times, Daily Mail`) in the
-  sidebar.  The app looks up publication names in a built‑in mapping
-  (`PUBLICATION_DOMAINS` in `app.py`) and translates them into domain
-  filters.  It then uses the Google News `site:` search operator combined
-  with a recency filter (e.g., `when:7d`) to build RSS feeds for each domain
-  【168391965472992†L183-L223】.  This lets you focus on outlets such as The Times,
-  The Telegraph, Daily Mail, Mining Review Africa, Mining Weekly, Mining
-  Journal, Mining Magazine, Mining.com, Energy Voice, Upstreamonline.com,
-  Financial Times, Reuters or Bloomberg.
-* **Secure secret management** – API keys are never hard‑coded.  Store your
-  `NEWS_API_KEY` in the `.streamlit/secrets.toml` file or as an environment
-  variable; the app reads it automatically.  Streamlit’s secret management
-  documentation recommends using environment variables instead of embedding
-  keys in code【10524337110845†L214-L264】.
+* **Clean Streamlit dashboard** – results are presented in expandable cards
+  inspired by the Clippings design.  Each card shows the headline,
+  publication date and scores, along with a short excerpt and a link to
+  the full article.
+* **Single search bar** – simply enter a topic, brand or person into the
+  search field on the home page.  There is no sidebar or slider.  Click
+  *Search* to fetch up to 20 articles.
+* **Domain filtering via search syntax** – you can focus on particular
+  outlets by using the `site:` operator directly in your search query, e.g.
+  `site:ft.com mergers` or `site:reuters.com site:bloomberg.com fintech`.  All
+  Google News operators are supported【168391965472992†L183-L223】.  There is no longer
+  a separate sidebar field for domains, making the interface cleaner.
+
+* **No API keys required** – the simplified application relies solely on
+  publicly available Google News RSS feeds.  You do not need to register
+  or supply any API keys.
 
 ## Getting started locally
 
@@ -89,48 +111,19 @@ requiring any coding knowledge.
    pip install --upgrade pip
    pip install -r requirements.txt
    ```
-3. **Add your NewsAPI key** (optional but strongly recommended):
-
-   Create a file called `.streamlit/secrets.toml` in the root of the
-   repository with the following contents:
-
-   ```toml
-   # .streamlit/secrets.toml
-   NEWS_API_KEY = "your_api_key_here"
-   ```
-
-   You can register for a free key at [newsapi.org](https://newsapi.org) and
-   paste it here.  Without a key the app falls back to the Google News RSS
-   feed, which may return fewer results.
-
-4. **Optionally add a Guardian API key**:
-
-   To search The Guardian’s archive and receive the full body of each article
-   without scraping, register for a free developer key on
-   [The Guardian Open Platform](https://open-platform.theguardian.com/).  Then
-   add a second line to your `.streamlit/secrets.toml` file:
-
-   ```toml
-   GUARDIAN_API_KEY = "your_guardian_key_here"
-   ```
-
-   The developer key allows up to 500 calls per day and includes access to the
-   full article body【666270658916805†L21-L35】.  The app uses the `show-fields=body`
-   filter to retrieve article text directly from the API【555774334167872†L49-L53】.
-
-5. **Run the app**:
+3. **Run the app**:
 
    ```bash
    streamlit run app.py
    ```
 
-6. **Interact with the dashboard** – use the sidebar to enter keywords,
-   adjust the number of articles per keyword, optionally specify
-   comma‑separated domain names or publication names (e.g., `reuters.com,dailymail.co.uk` or
-   `The Times, Mining Weekly`) to restrict searches, and click *Search* to
-   refresh results.  The app maps publication names to the appropriate
-   domains internally.  Click on a row in the results table or change the
-   index in the number input to view the full text and details.
+4. **Interact with the dashboard** – open
+   [http://localhost:8501](http://localhost:8501) in your browser.  Type a
+   keyword, brand or person into the search bar, enable “UK coverage only” if
+   you want to restrict to UK publications, and click *Search*.  Use
+   advanced operators like `site:reuters.com` or `when:3d` directly in the
+   search bar to filter results.  Expand any result card to read an excerpt
+   and follow the link to the full article.
 
 ### Customising source authority
 
@@ -147,47 +140,22 @@ sources are assigned a modest default score.
 2. **Create a new app** on [Streamlit Community Cloud](https://streamlit.io/cloud).
    Connect it to your forked repository and select the `app.py` file as the
    entrypoint.
-3. **Configure secrets**: after creating the app, open the *Secrets* tab on
-   Streamlit Cloud and add your `NEWS_API_KEY` as follows (one key per line):
-
-   ```toml
-   NEWS_API_KEY = "your_api_key_here"
-   ```
-
-   To include The Guardian archive, also add your `GUARDIAN_API_KEY` on a
-   separate line:
-
-   ```toml
-   GUARDIAN_API_KEY = "your_guardian_key_here"
-   ```
-
-4. **Deploy**.  Streamlit will automatically build and launch your app.  You
-   can share the public URL with colleagues or stakeholders.  If you need to
-   update the app later, simply commit and push changes to your GitHub
-   repository; Streamlit Cloud will re‑deploy automatically.
+3. **Deploy**.  Streamlit will automatically build and launch your app.
+   There are no secrets to configure because the app uses only the Google
+   News RSS feed.  Share the public URL with colleagues or stakeholders.
+   Whenever you update the repository, Streamlit Cloud will re‑deploy
+   automatically.
 
 ## Adding additional data sources
 
-This application is intentionally modular.  The `fetch_from_newsapi`,
-`fetch_from_google_rss`, `fetch_from_gdelt` and `fetch_from_guardian` functions
-encapsulate retrieval logic.  You can extend the system by adding new
-functions that call other APIs, RSS feeds or custom scrapers.  To plug new
-results into the ranking algorithm, ensure each returned dictionary contains
-at least `title`, `url`, `source.name`, `publishedAt` and (optionally)
-`content` keys.  The recency and authority functions will handle the rest.
-
-When adding API integrations, check whether the service provides full article
-bodies.  For example, The Guardian API exposes a `show-fields=body` filter
-that returns the article body directly【555774334167872†L49-L53】, whereas GDELT
-returns only URLs and metadata.  For services that provide no body text, the
-application will automatically scrape the articles using its multi‑stage
-extractor chain.
-
-By default the app queries GDELT’s DOC 2.0 API in “ArtList” mode, which
-returns a list of article URLs and metadata for stories published in the last
-three months【317432739810327†L21-L63】.  You can adjust the `max_records` and
-`timespan` parameters in `fetch_from_gdelt` to control how many results are
-returned and over what time window.
+This application remains modular.  The core retrieval happens via
+`fetch_from_google_rss`, and domain‑specific searches are handled by
+`fetch_from_google_site_search`.  To extend the system with additional
+sources (e.g., a licensed news API or a custom scraper), add a new
+function that returns a list of dictionaries with at least the `title`,
+`url`, `source.name` and `publishedAt` keys.  You can then merge those
+results into the `all_articles` list inside `run_monitoring`.  The scoring
+and display logic will handle the rest.
 
 ## Ethical and legal considerations
 

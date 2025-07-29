@@ -4,5 +4,24 @@ pandas>=2.2.2
 newspaper3k>=0.2.8
 feedparser>=6.0.10
 nltk>=3.8.1
-# lxml_html_clean provides the HTML cleaner required by newspaper3k
+# "lxml.html.clean" has been extracted from the main lxml package as of lxml 5.2.
+# Newspaper3k relies on lxml's HTML cleaner for article parsing. Without the
+# separate cleaner package, importing `newspaper` will raise an ImportError
+# stating that `lxml.html.clean` has become the independent project
+# ``lxml_html_clean``. To resolve this, explicitly install the
+# ``lxml_html_clean`` package. See this Medium article for context, which
+# explains that when using Newspaper3k, the error can be fixed by installing
+# ``lxml_html_clean`` or ``lxml[html_clean]``【110656884634172†L92-L100】.
 lxml_html_clean>=0.4.2
+# Goose3 is an Apache‑licensed article extractor used as a fallback when
+# newspaper3k fails to parse a page.  It extracts the main text, metadata
+# and images from articles【275271027204652†L203-L371】.
+goose3>=3.1.0
+# readability-lxml is a Python port of the Readability algorithm that extracts
+# the main body text and title from HTML documents.  It is licensed under
+# the Apache License 2.0 and provides a robust fallback when other
+# extractors fail【842996678366491†L94-L126】.
+readability-lxml>=0.8.4
+# BeautifulSoup4 is used to convert HTML returned by readability-lxml and
+# the Guardian API into plain text for display.
+beautifulsoup4>=4.10.0

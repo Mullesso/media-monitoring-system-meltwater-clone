@@ -25,8 +25,36 @@ import pandas as pd
 import requests
 import streamlit as st
 from newspaper import Article
+from goose3 import Goose  # fallback article extractor (Apache-2.0 licensed)
+from readability import Document  # final fallback article extractor (Apache‑licensed)
+from bs4 import BeautifulSoup  # used to convert readability HTML into plain text
 import feedparser
 import nltk
+
+# Mapping of common publication names to their primary domain names.  This
+# dictionary makes it easy to restrict searches to specific outlets when
+# users provide publication names instead of raw domain strings.  Each key
+# corresponds to a lower‑cased publication name, and the value is a list
+# of domains associated with that publication.  For example, "the times"
+# maps to ``thetimes.co.uk``, while "mining journal" includes both
+# ``mining-journal.com`` and ``miningjournal.com`` because the brand
+# operates across multiple domains.  Feel free to extend this mapping as
+# needed for additional publications.
+PUBLICATION_DOMAINS: Dict[str, List[str]] = {
+    "the times": ["thetimes.co.uk"],
+    "the telegraph": ["telegraph.co.uk"],
+    "daily mail": ["dailymail.co.uk"],
+    "mining review africa": ["miningreview.com"],
+    "mining weekly": ["miningweekly.com"],
+    "mining journal": ["mining-journal.com", "miningjournal.com"],
+    "mining magazine": ["miningmagazine.com"],
+    "mining.com": ["mining.com"],
+    "energy voice": ["energyvoice.com"],
+    "upstreamonline.com": ["upstreamonline.com"],
+    "financial times": ["ft.com"],
+    "reuters": ["reuters.com"],
+    "bloomberg": ["bloomberg.com"],
+}
 
 # -----------------------------------------------------------------------------
 # Utility functions
@@ -36,7 +64,7 @@ import nltk
 # prioritisation scores.  Keeping these functions separate makes the core
 # application logic clearer and easier to test.
 
-def fetch_from_newsapi(query: str, api_key: str, page_size: int = 20) -> List[Dict]:
+def fetch_from_newsapi(query: str, api_key: str, page_size: int = 20, domains: str | None = None) -> List[Dict]:
     """Fetch news articles matching a query using the NewsAPI.
 
     Parameters
@@ -62,6 +90,13 @@ def fetch_from_newsapi(query: str, api_key: str, page_size: int = 20) -> List[Di
         "pageSize": page_size,
         "apiKey": api_key,
     }
+    # If domains have been specified, restrict the search.  The NewsAPI
+    # documentation notes that the ``domains`` parameter accepts a
+    # comma‑separated list of domains (e.g. "reuters.com, bloomberg.com").  If
+    # present, we simply add it to the query parameters.  Note that not all
+    # publications are supported by NewsAPI.
+    if domains:
+        params["domains"] = domains
     try:
         response = requests.get(endpoint, params=params, timeout=15)
         response.raise_for_status()
@@ -120,12 +155,61 @@ def fetch_from_google_rss(query: str, limit: int = 20) -> List[Dict]:
     return articles
 
 
-def scrape_article(url: str) -> Tuple[str, datetime.datetime]:
-    """Attempt to download and parse a news article.
+def fetch_from_google_site_search(query: str, domain: str, days: int = 7, limit: int = 20) -> List[Dict]:
+    """Fetch news items from a specific website using Google News RSS.
 
-    The ``newspaper3k`` library extracts the full text and publication date
-    of articles.  Some sites block scrapers or use complex layouts; if
-    extraction fails this function returns an empty string and ``None``.
+    Google News RSS supports advanced search operators such as `site:` and
+    `when:` to limit results to a particular domain and recency.  For
+    example, the search `site:reuters.com when:1h` returns Reuters stories
+    published in the last hour【168391965472992†L183-L221】.  Replacing the `/search` path
+    with `/rss/search` yields an RSS feed for the same query【168391965472992†L211-L223】.
+    This helper function constructs such a query by combining a keyword
+    with a site filter and recency window, then delegates to
+    ``fetch_from_google_rss`` for parsing.
+
+    Parameters
+    ----------
+    query : str
+        Search keywords (e.g., "AI startups").  May be an empty string to
+        fetch recent articles from the domain irrespective of keywords.
+    domain : str
+        The domain to restrict results to (e.g., "reuters.com").
+    days : int, optional
+        Limit results to articles published within the last ``days`` days
+        using the `when:` operator (default is 7).
+    limit : int, optional
+        Maximum number of entries to return (default is 20).
+
+    Returns
+    -------
+    List[Dict]
+        A list of article dictionaries similar to ``fetch_from_google_rss``.
+    """
+    # Build the search string.  The `site:` operator restricts results to
+    # the given domain, and the `when:` operator restricts the time window
+    # (e.g., 7d for the last seven days)【168391965472992†L183-L221】.
+    parts = []
+    if query:
+        parts.append(query.strip())
+    if domain:
+        parts.append(f"site:{domain.strip()}")
+    if days:
+        parts.append(f"when:{days}d")
+    search_str = " ".join(parts)
+    return fetch_from_google_rss(search_str, limit=limit)
+
+
+def scrape_article(url: str) -> Tuple[str, datetime.datetime]:
+    """Attempt to download and parse a news article using multiple extractors.
+
+    This function first tries ``newspaper3k`` to obtain the full article text and
+    its publish date.  ``newspaper3k`` relies on lxml's HTML cleaner and works
+    well on many mainstream sites, but some sites block scrapers or have
+    unusual layouts.  If ``newspaper3k`` fails to extract any text, the
+    function falls back to the ``goose3`` extractor, which is licensed under
+    Apache 2.0 and can extract the main body, meta data and images from
+    arbitrary articles【275271027204652†L203-L371】.  If both extractors fail, an empty
+    string and ``None`` are returned.
 
     Parameters
     ----------
@@ -137,15 +221,199 @@ def scrape_article(url: str) -> Tuple[str, datetime.datetime]:
     Tuple[str, datetime.datetime]
         A tuple of the article text and its publish date (if available).
     """
-    article = Article(url)
+    """Attempt to download and parse a news article using multiple extractors.
+
+    This function first tries ``newspaper3k`` to obtain the full article text and
+    its publish date.  ``newspaper3k`` relies on lxml's HTML cleaner and works
+    well on many mainstream sites, but some sites block scrapers or have
+    unusual layouts.  If ``newspaper3k`` fails to extract any text, the
+    function falls back to the ``goose3`` extractor, which is licensed under
+    Apache 2.0 and can extract the main body, meta data and images from
+    arbitrary articles【275271027204652†L203-L371】.  Finally, if both extractors fail,
+    the function uses ``readability‑lxml`` to extract the main content from
+    raw HTML【842996678366491†L94-L126】.  When all extractors fail, an empty
+    string and ``None`` are returned.
+
+    Parameters
+    ----------
+    url : str
+        URL of the news article to scrape.
+
+    Returns
+    -------
+    Tuple[str, datetime.datetime]
+        A tuple of the article text and its publish date (if available).
+    """
+    # Try newspaper3k first
     try:
+        article = Article(url)
         article.download()
         article.parse()
         text = article.text
         date = article.publish_date
-        return text, date
+        if text:
+            return text, date
+    except Exception:
+        pass
+    # Fallback to Goose3
+    try:
+        g = Goose({"browser_user_agent": "Mozilla/5.0"})
+        content = g.extract(url=url)
+        text = getattr(content, "cleaned_text", "") or ""
+        date = getattr(content, "publish_date", None)
+        if text:
+            return text, date
+    except Exception:
+        pass
+    # Final fallback to readability-lxml
+    try:
+        resp = requests.get(url, timeout=15)
+        resp.raise_for_status()
+        doc = Document(resp.text)
+        # ``summary()`` returns HTML containing the main content【842996678366491†L94-L126】
+        html_content = doc.summary()  # type: ignore[attr-defined]
+        soup = BeautifulSoup(html_content, "html.parser")
+        # Extract plain text from the HTML
+        text = soup.get_text(separator="\n").strip()
+        # readability-lxml does not provide a publish date; return None
+        return text, None
     except Exception:
         return "", None
+
+
+def fetch_from_gdelt(query: str, max_records: int = 20) -> List[Dict]:
+    """Fetch articles from the GDELT DOC 2.0 API.
+
+    The GDELT Project monitors news coverage across the world and machine
+    translates it into English.  Its DOC 2.0 API allows searching over a
+    rolling three‑month window and supports JSON output【317432739810327†L21-L63】.  This
+    function queries the API in ``ArtList`` mode and returns a list of
+    dictionaries similar to the NewsAPI format.  If the API call fails or
+    returns an unexpected schema, an empty list is returned.
+
+    Parameters
+    ----------
+    query : str
+        Search string for the API.
+    max_records : int, optional
+        Maximum number of articles to retrieve (default is 20).
+
+    Returns
+    -------
+    List[Dict]
+        A list of article dictionaries with keys: ``title``, ``description``,
+        ``url``, ``source`` and ``publishedAt``.
+    """
+    base_url = "https://api.gdeltproject.org/api/v2/doc/doc"
+    params = {
+        "query": query,
+        "mode": "ArtList",  # return a list of matching articles
+        "maxrecords": max_records,
+        "format": "json",  # JSONFeed 1.0 format
+        "sort": "datedesc",  # newest first
+        "timespan": "1 week",  # restrict to last 7 days
+    }
+    try:
+        resp = requests.get(base_url, params=params, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception:
+        return []
+    # The JSONFeed format returns an ``items`` list
+    articles_list = []
+    items = data.get("items") or data.get("articles") or []
+    for item in items:
+        title = item.get("title", "")
+        url = item.get("url", item.get("id", ""))
+        # published date may be in ISO 8601 format or absent
+        date_str = item.get("date_published") or item.get("publishedAt")
+        if date_str:
+            try:
+                dt = datetime.datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+                published_at = dt.isoformat()
+            except Exception:
+                published_at = None
+        else:
+            published_at = None
+        articles_list.append(
+            {
+                "title": title,
+                "description": item.get("summary", ""),
+                "url": url,
+                "source": {"name": item.get("source", {}).get("title", "GDELT")},
+                "publishedAt": published_at,
+            }
+        )
+    return articles_list
+
+
+def fetch_from_guardian(query: str, api_key: str, page_size: int = 20) -> List[Dict]:
+    """Fetch articles from The Guardian Open Platform.
+
+    The Guardian provides an [Open Platform](https://open-platform.theguardian.com)
+    that exposes the full archive of articles dating back to 1999.  Developers
+    can register for a free key for non‑commercial usage, which allows up to
+    500 calls per day and includes access to the article body text【666270658916805†L21-L35】.
+    To retrieve the full body text, the API supports a `show-fields` filter
+    parameter.  Setting `show-fields=body` returns the body of each article
+    【555774334167872†L49-L53】, so there is no need for additional scraping.
+
+    Parameters
+    ----------
+    query : str
+        Search string for the API.
+    api_key : str
+        Developer or commercial API key for the Guardian content API.
+    page_size : int, optional
+        Number of results to return (default is 20).
+
+    Returns
+    -------
+    List[Dict]
+        A list of article dictionaries with keys: ``title``, ``description``
+        (lead paragraph), ``url``, ``source`` and ``publishedAt``.  The
+        ``content`` field contains the plain text body extracted from the API.
+    """
+    endpoint = "https://content.guardianapis.com/search"
+    params = {
+        "q": query,
+        "api-key": api_key,
+        "page-size": page_size,
+        "order-by": "newest",
+        # Request the body field to get full article text【555774334167872†L49-L53】
+        "show-fields": "body,trailText",
+    }
+    try:
+        resp = requests.get(endpoint, params=params, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        # Do not display user secrets in the error; log generic message
+        st.error(f"Failed to fetch articles from The Guardian API: {e}")
+        return []
+    results = data.get("response", {}).get("results", [])
+    articles: List[Dict] = []
+    for item in results:
+        title = item.get("webTitle", "")
+        url = item.get("webUrl", "")
+        published_at = item.get("webPublicationDate")
+        # `trailText` is a short summary; `body` contains HTML of the full article
+        fields = item.get("fields", {}) or {}
+        html_body = fields.get("body", "")
+        # Convert the HTML body to plain text
+        text = BeautifulSoup(html_body, "html.parser").get_text(separator="\n").strip() if html_body else ""
+        description = fields.get("trailText", "")
+        articles.append(
+            {
+                "title": title,
+                "description": description,
+                "url": url,
+                "source": {"name": "The Guardian"},
+                "publishedAt": published_at,
+                "content": text,
+            }
+        )
+    return articles
 
 
 def recency_score(published_at: str) -> float:
@@ -270,21 +538,30 @@ def main() -> None:
         value="AI startups, Fintech, mergers and acquisitions"
     )
     max_articles = st.sidebar.slider(
-        "Maximum articles per keyword",
+        "Maximum articles per keyword or site",
         min_value=5,
         max_value=50,
         value=20
     )
+    # Allow users to specify either raw domains (e.g. reuters.com) or
+    # human‑readable publication names (e.g. The Times, Daily Mail).  If
+    # names are supplied, they will be looked up in the ``PUBLICATION_DOMAINS``
+    # mapping to derive the corresponding domain(s).  You can combine
+    # publication names and domains in the same comma‑separated string.
+    domains_input = st.sidebar.text_input(
+        "Restrict to specific domains or publications (comma separated, optional)",
+        value=""
+    )
     if st.sidebar.button("Search"):
-        run_monitoring(keyword_input, max_articles)
+        run_monitoring(keyword_input, max_articles, domains_input)
 
     # Automatically run once on page load for demonstration
     if "initial_run" not in st.session_state:
         st.session_state.initial_run = True
-        run_monitoring(keyword_input, max_articles)
+        run_monitoring(keyword_input, max_articles, domains_input)
 
 
-def run_monitoring(query_string: str, max_articles: int) -> None:
+def run_monitoring(query_string: str, max_articles: int, domains_input: str = "") -> None:
     """Run the monitoring process for a given set of queries.
 
     This function performs the actual retrieval, scraping and prioritisation of
@@ -300,25 +577,63 @@ def run_monitoring(query_string: str, max_articles: int) -> None:
     """
     with st.spinner("Fetching news articles…"):
         queries = [q.strip() for q in query_string.split(",") if q.strip()]
-        api_key = None
-        # Try to read API key from Streamlit secrets or environment
-        if hasattr(st, "secrets") and "NEWS_API_KEY" in st.secrets:
-            api_key = st.secrets["NEWS_API_KEY"]
-        elif os.getenv("NEWS_API_KEY"):
-            api_key = os.getenv("NEWS_API_KEY")
-        else:
+        # Load API keys from Streamlit secrets or environment variables
+        news_api_key: str | None = None
+        guardian_key: str | None = None
+        if hasattr(st, "secrets"):
+            news_api_key = st.secrets.get("NEWS_API_KEY")
+            guardian_key = st.secrets.get("GUARDIAN_API_KEY")
+        # Fallback to environment variables if secrets not configured
+        news_api_key = news_api_key or os.getenv("NEWS_API_KEY")
+        guardian_key = guardian_key or os.getenv("GUARDIAN_API_KEY")
+
+        if not news_api_key:
             st.info(
                 "No NEWS_API_KEY found.  The app will use the public Google News RSS feed instead, which may return limited and delayed results.\n"
                 "To receive more comprehensive coverage, create a free account on NewsAPI.org and add your key to the Streamlit secrets as 'NEWS_API_KEY'."
             )
+        if not guardian_key:
+            st.info(
+                "No GUARDIAN_API_KEY provided.  To include The Guardian's archive and full article texts in search results, register for a free developer key on The Guardian Open Platform and add it as 'GUARDIAN_API_KEY' in your secrets."
+            )
 
         all_articles: List[Dict] = []
+        # Parse any domain restrictions or publication names from the argument.
+        # For each comma‑separated token, check if it matches a key in
+        # ``PUBLICATION_DOMAINS``.  If so, extend the domain list with all
+        # associated domains; otherwise assume the token itself is a domain.
+        domain_list: List[str] = []
+        for token in [d.strip() for d in domains_input.split(",") if d.strip()]:
+            key = token.lower()
+            if key in PUBLICATION_DOMAINS:
+                domain_list.extend(PUBLICATION_DOMAINS[key])
+            else:
+                # Accept bare domains like "reuters.com" or names not in mapping
+                domain_list.append(token)
+        # Remove duplicates while preserving order
+        seen: set[str] = set()
+        domain_list = [d for d in domain_list if not (d in seen or seen.add(d))]
         for q in queries:
-            if api_key:
-                articles = fetch_from_newsapi(q, api_key, page_size=max_articles)
+            # Prefer NewsAPI when a key is available; otherwise fall back to RSS
+            if news_api_key:
+                # If a domain list is provided, join into a comma‑separated string
+                # for the NewsAPI "domains" parameter.  Otherwise pass None.
+                dom_param = ",".join(domain_list) if domain_list else None
+                articles = fetch_from_newsapi(q, news_api_key, page_size=max_articles, domains=dom_param)
             else:
                 articles = fetch_from_google_rss(q, limit=max_articles)
             all_articles.extend(articles)
+            # If domains have been specified, query Google News RSS for each domain with site restriction
+            for domain in domain_list:
+                site_articles = fetch_from_google_site_search(q, domain, days=7, limit=max_articles)
+                all_articles.extend(site_articles)
+            # Query the Guardian API if a key is available
+            if guardian_key:
+                guardian_articles = fetch_from_guardian(q, guardian_key, page_size=max_articles)
+                all_articles.extend(guardian_articles)
+            # Also query the GDELT DOC 2.0 API for broader coverage
+            gdelt_articles = fetch_from_gdelt(q, max_records=max_articles)
+            all_articles.extend(gdelt_articles)
 
         if not all_articles:
             st.warning("No articles were found for the specified queries.")
@@ -328,8 +643,13 @@ def run_monitoring(query_string: str, max_articles: int) -> None:
         scraped_results = []
         for art in all_articles:
             url = art.get("url")
-            # Only scrape if no description or to enrich the article; avoid being blocked
-            text, pub_date = scrape_article(url) if url else ("", None)
+            # Use existing content if provided by API (e.g., Guardian); otherwise scrape
+            if art.get("content"):
+                text = art["content"]
+                pub_date = None
+            else:
+                text, pub_date = scrape_article(url) if url else ("", None)
+            # If the article had no publication date from the API but scraping succeeded, update it
             if not art.get("publishedAt") and pub_date:
                 art["publishedAt"] = pub_date.isoformat()
             art["content"] = text

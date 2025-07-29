@@ -4,3 +4,5 @@ pandas>=2.2.2
 newspaper3k>=0.2.8
 feedparser>=6.0.10
 nltk>=3.8.1
+# lxml_html_clean provides the HTML cleaner required by newspaper3k
+lxml_html_clean>=0.4.2

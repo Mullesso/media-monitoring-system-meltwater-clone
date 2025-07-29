@@ -577,10 +577,9 @@ def main() -> None:
     if st.sidebar.button("Search"):
         run_monitoring(keyword_input, max_articles, domains_input)
 
-    # Automatically run once on page load for demonstration
-    if "initial_run" not in st.session_state:
-        st.session_state.initial_run = True
-        run_monitoring(keyword_input, max_articles, domains_input)
+    # Do not automatically run a search on page load.  Users must click
+    # the "Search" button after entering their keywords or domains.  This
+    # avoids making unnecessary API requests before the user is ready.
 
 
 def run_monitoring(query_string: str, max_articles: int, domains_input: str = "") -> None:
@@ -673,7 +672,13 @@ def run_monitoring(query_string: str, max_articles: int, domains_input: str = ""
                 text, pub_date = scrape_article(url) if url else ("", None)
             # If the article had no publication date from the API but scraping succeeded, update it
             if not art.get("publishedAt") and pub_date:
-                art["publishedAt"] = pub_date.isoformat()
+                # Only call isoformat() on objects that implement it.  Some
+                # extractors may return dates as strings or None.  Convert
+                # non‑datetime values to strings gracefully【no citation】.
+                if hasattr(pub_date, "isoformat"):
+                    art["publishedAt"] = pub_date.isoformat()
+                else:
+                    art["publishedAt"] = str(pub_date)
             art["content"] = text
             scraped_results.append(art)
 

@@ -19,7 +19,7 @@ Author: Media Monitoring System
 import datetime
 import os
 import urllib.parse
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 
 import pandas as pd
 import requests
@@ -44,6 +44,54 @@ except ImportError:
     BeautifulSoup = None  # type: ignore[assignment]
 import feedparser
 import nltk
+
+# Optional sentiment analysis: VADER is a lexicon‑ and rule‑based sentiment
+# analyser specifically attuned to sentiments expressed in social media and
+# performs well on other domains as well【528669426112280†L32-L35】.  If the
+# package is unavailable, the application will skip sentiment scoring.
+try:
+    from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer  # type: ignore[import-not-found]
+except ImportError:
+    SentimentIntensityAnalyzer = None  # type: ignore[assignment]
+
+# Report generation dependencies.  We use ReportLab to build PDF reports
+# styled after the provided Word template.  The PIL library is used via
+# ReportLab's ImageReader; both packages are optional at runtime but
+# declared in requirements.  If unavailable, report generation will fail
+# gracefully.
+try:
+    from reportlab.lib.pagesizes import A4  # type: ignore[import-not-found]
+    from reportlab.platypus import (
+        SimpleDocTemplate,
+        Paragraph,
+        Spacer,
+        Table,
+        TableStyle,
+        Image as RLImage,
+        PageBreak,
+    )
+    from reportlab.lib import colors  # type: ignore[import-not-found]
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle  # type: ignore[import-not-found]
+    from reportlab.lib.units import inch  # type: ignore[import-not-found]
+    from reportlab.lib.utils import ImageReader  # type: ignore[import-not-found]
+except ImportError:
+    # If ReportLab is missing, we will not be able to generate PDFs
+    A4 = None  # type: ignore[assignment]
+    SimpleDocTemplate = None  # type: ignore[assignment]
+    Paragraph = None  # type: ignore[assignment]
+    Spacer = None  # type: ignore[assignment]
+    Table = None  # type: ignore[assignment]
+    TableStyle = None  # type: ignore[assignment]
+    RLImage = None  # type: ignore[assignment]
+    PageBreak = None  # type: ignore[assignment]
+    colors = None  # type: ignore[assignment]
+    getSampleStyleSheet = None  # type: ignore[assignment]
+    ParagraphStyle = None  # type: ignore[assignment]
+    inch = None  # type: ignore[assignment]
+    ImageReader = None  # type: ignore[assignment]
+
+import io
+from pathlib import Path
 
 # Mapping of common publication names to their primary domain names.  This
 # dictionary makes it easy to restrict searches to specific outlets when
@@ -120,6 +168,327 @@ def fetch_from_newsapi(query: str, api_key: str, page_size: int = 20, domains: s
         return []
 
     return data.get("articles", [])
+
+
+# -----------------------------------------------------------------------------
+# Sentiment analysis and tier classification
+#
+# To provide richer insights, the application assigns a simple sentiment
+# classification to each article and groups publications into broad tiers.  The
+# sentiment is computed using VADER, a lexicon‑ and rule‑based model that
+# returns a compound score between ‑1 (very negative) and 1 (very positive)
+#【126899030742881†L284-L304】.  We convert the compound score into three labels: positive,
+# neutral or negative, following the conventional thresholds described in
+# the VADER documentation【126899030742881†L372-L393】.  If the VADER package is not
+# installed, sentiment is left undefined and the report will omit that
+# column.
+
+# Create a global analyser instance if the dependency is available.  Creating
+# this object once avoids repeatedly downloading the VADER lexicon.
+if SentimentIntensityAnalyzer is not None:
+    _vader_analyser: Optional[SentimentIntensityAnalyzer] = SentimentIntensityAnalyzer()
+else:
+    _vader_analyser = None
+
+
+def compute_sentiment(text: str) -> Tuple[Optional[str], float]:
+    """Compute a sentiment label and compound score for a piece of text.
+
+    Parameters
+    ----------
+    text : str
+        The article body or description from which to derive sentiment.
+
+    Returns
+    -------
+    tuple
+        A tuple ``(label, score)`` where ``label`` is one of ``"positive"``,
+        ``"neutral"``, ``"negative"`` or ``None`` if sentiment cannot be
+        calculated, and ``score`` is the compound VADER score in the range
+        [‑1, 1].  A ``None`` label indicates that VADER is not installed.
+    """
+    if not text or _vader_analyser is None:
+        return None, 0.0
+    try:
+        scores = _vader_analyser.polarity_scores(text)
+        compound = scores.get("compound", 0.0)
+        if compound >= 0.05:
+            label = "positive"
+        elif compound <= -0.05:
+            label = "negative"
+        else:
+            label = "neutral"
+        return label, compound
+    except Exception:
+        return None, 0.0
+
+
+# Define publication tiers.  Major international outlets with strong editorial
+# standards are classified as ``Top``; national or regional papers fall under
+# ``Mid``; industry‑specific titles form the ``Trade`` tier.  These lists are
+# heuristic and can be expanded via configuration or by editing the code.
+TOP_TIER_OUTLETS = {
+    "reuters",
+    "financial times",
+    "bloomberg",
+    "the new york times",
+    "the wall street journal",
+    "bbc news",
+}
+MID_TIER_OUTLETS = {
+    "the times",
+    "the telegraph",
+    "daily mail",
+    "the guardian",
+    "the independent",
+}
+TRADE_TIER_OUTLETS = {
+    "mining review africa",
+    "mining weekly",
+    "mining journal",
+    "mining magazine",
+    "mining.com",
+    "energy voice",
+    "upstreamonline.com",
+}
+
+
+def assign_tier(source_name: str) -> Optional[str]:
+    """Assign a publication to a tier based on its name.
+
+    Parameters
+    ----------
+    source_name : str
+        The name of the news outlet as returned by RSS or API.
+
+    Returns
+    -------
+    str or None
+        ``"Top"``, ``"Mid"``, ``"Trade"`` for recognised outlets or ``None``
+        if the source is unclassified.  Blogs and unknown sites return
+        ``None`` and are excluded from PDF reports.
+    """
+    if not source_name:
+        return None
+    name = source_name.lower()
+    # Check trade first because some names may overlap with generic terms
+    for outlet in TRADE_TIER_OUTLETS:
+        if outlet in name:
+            return "Trade"
+    for outlet in MID_TIER_OUTLETS:
+        if outlet in name:
+            return "Mid"
+    for outlet in TOP_TIER_OUTLETS:
+        if outlet in name:
+            return "Top"
+    return None
+
+
+def generate_pdf_report(articles: List[Dict], include_sentiment: bool) -> Optional[bytes]:
+    """Generate a PDF report from selected articles.
+
+    The report replicates the layout of the provided Word template.  It
+    features a header image with a grey bar labelled "Press Coverage", a
+    date and logo row, grouped tables for each publication tier and a
+    footer with contact details and icons.  If ReportLab is not
+    available, this function returns ``None``.
+
+    Parameters
+    ----------
+    articles : list of dict
+        The selected articles to include in the report.  Each dictionary
+        should contain ``title``, ``source`` (with ``name``), ``publishedAt``,
+        ``url``, ``tier`` and optionally ``sentiment``.
+    include_sentiment : bool
+        If True, append a sentiment column to each table.
+
+    Returns
+    -------
+    bytes or None
+        The PDF file as bytes if successful; otherwise ``None``.
+    """
+    if A4 is None or SimpleDocTemplate is None:
+        # ReportLab is not installed
+        return None
+    # Sort articles by tier according to the desired order
+    tier_order = ["Top", "Mid", "Trade"]
+    grouped: Dict[str, List[Dict]] = {t: [] for t in tier_order}
+    for art in articles:
+        tier = art.get("tier")
+        if tier in grouped:
+            grouped[tier].append(art)
+    # Create a buffer to hold the PDF in memory
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=A4,
+        rightMargin=0.5 * inch,
+        leftMargin=0.5 * inch,
+        topMargin=0.5 * inch,
+        bottomMargin=0.5 * inch,
+    )
+    styles = getSampleStyleSheet()
+    # Custom styles for headings and table text
+    heading_style = ParagraphStyle(
+        name="Heading",
+        parent=styles["Heading2"],
+        fontSize=14,
+        leading=16,
+        spaceAfter=6,
+    )
+    table_text_style = ParagraphStyle(
+        name="TableText",
+        parent=styles["BodyText"],
+        fontSize=10,
+        leading=12,
+    )
+    table_link_style = ParagraphStyle(
+        name="TableLink",
+        parent=styles["BodyText"],
+        fontSize=10,
+        leading=12,
+        textColor=colors.HexColor("#0066CC"),
+        underline=True,
+    )
+    elements: List = []
+    # For each tier, build a table if there are articles
+    for tier in tier_order:
+        items = grouped.get(tier) or []
+        if not items:
+            continue
+        # Section heading
+        elements.append(Paragraph(f"{tier} Tier", heading_style))
+        # Table header
+        header = ["Headline", "Publication", "Date", "URL"]
+        if include_sentiment:
+            header.append("Sentiment")
+        data = [header]
+        # Populate rows
+        for art in items:
+            title = art.get("title") or "Untitled"
+            pub_name = art.get("source", {}).get("name", "")
+            date_str = art.get("publishedAt") or ""
+            # Use a hyperlink for the URL column; ReportLab's Paragraph supports
+            # simple markup: <a href="...">text</a>
+            url = art.get("url", "")
+            link_para = Paragraph(f"<a href='{url}'>Link</a>", table_link_style)
+            row = [
+                Paragraph(title, table_text_style),
+                Paragraph(pub_name, table_text_style),
+                Paragraph(date_str.split("T")[0] if date_str else "", table_text_style),
+                link_para,
+            ]
+            if include_sentiment:
+                sentiment_label = art.get("sentiment") or ""
+                row.append(Paragraph(sentiment_label.capitalize(), table_text_style))
+            data.append(row)
+        # Determine column widths; adjust for sentiment column
+        if include_sentiment:
+            col_widths = [3.5 * inch, 1.5 * inch, 1.0 * inch, 1.2 * inch, 1.0 * inch]
+        else:
+            col_widths = [4.0 * inch, 1.7 * inch, 1.2 * inch, 1.6 * inch]
+        table = Table(data, colWidths=col_widths, repeatRows=1)
+        # Style the table: grey header, alternating row shading, grid lines
+        style_commands = [
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#DDDDDD')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.HexColor('#333333')),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, -1), 10),
+            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#F5F5F5')]),
+            ('GRID', (0, 0), (-1, -1), 0.25, colors.HexColor('#CCCCCC')),
+        ]
+        table.setStyle(TableStyle(style_commands))
+        elements.append(table)
+        elements.append(Spacer(1, 0.3 * inch))
+    # Function to draw header and footer on each page
+    def _header_footer(canvas, doc):
+        width, height = A4
+        # Header image
+        header_path = Path(__file__).parent / 'assets' / 'header.jpg'
+        logo_path = Path(__file__).parent / 'assets' / 'br_logo.png'
+        icon_globe = Path(__file__).parent / 'assets' / 'icon_globe.png'
+        icon_twitter = Path(__file__).parent / 'assets' / 'icon_twitter.png'
+        icon_linkedin = Path(__file__).parent / 'assets' / 'icon_linkedin.png'
+        icon_email = Path(__file__).parent / 'assets' / 'icon_email.png'
+        icon_phone = Path(__file__).parent / 'assets' / 'icon_phone.png'
+        # Header height (in points)
+        header_height = 2.0 * inch
+        bar_height = 0.35 * inch
+        y_top = height - doc.topMargin
+        # Draw the header image stretched to page width
+        try:
+            canvas.drawImage(
+                str(header_path),
+                0,
+                y_top - header_height,
+                width=width,
+                height=header_height,
+                preserveAspectRatio=True,
+                mask='auto'
+            )
+        except Exception:
+            # If the image cannot be drawn, silently skip
+            pass
+        # Overlay grey bar for the title
+        canvas.setFillColor(colors.HexColor('#485C6E'))
+        canvas.rect(0, y_top - header_height - bar_height, width, bar_height, stroke=0, fill=1)
+        # Title text
+        canvas.setFillColor(colors.white)
+        canvas.setFont('Helvetica-Bold', 16)
+        title_text = 'Press Coverage'
+        text_width = canvas.stringWidth(title_text, 'Helvetica-Bold', 16)
+        canvas.drawString(width - doc.rightMargin - text_width, y_top - header_height - bar_height + 0.1 * inch, title_text)
+        # Date text
+        date_str = datetime.datetime.now().strftime('%A %d %B %Y')
+        canvas.setFont('Helvetica', 12)
+        canvas.drawString(doc.leftMargin, y_top - header_height - bar_height - 0.2 * inch, date_str)
+        # Logo (draw to the right of the date)
+        try:
+            canvas.drawImage(
+                str(logo_path),
+                width - doc.rightMargin - 1.0 * inch,
+                y_top - header_height - bar_height - 0.5 * inch,
+                width=0.8 * inch,
+                height=0.8 * inch,
+                mask='auto'
+            )
+        except Exception:
+            pass
+        # Footer: grey divider line
+        canvas.setFillColor(colors.HexColor('#E5E5E5'))
+        canvas.rect(0, doc.bottomMargin - 0.4 * inch, width, 0.02 * inch, stroke=0, fill=1)
+        # Footer icons and text
+        # Starting position
+        x_start = doc.leftMargin
+        y_footer = doc.bottomMargin - 0.35 * inch
+        icon_size = 0.15 * inch
+        gap = 0.05 * inch
+        icons = [icon_globe, icon_twitter, icon_linkedin, icon_email, icon_phone]
+        for icon in icons:
+            try:
+                canvas.drawImage(
+                    str(icon),
+                    x_start,
+                    y_footer,
+                    width=icon_size,
+                    height=icon_size,
+                    mask='auto'
+                )
+            except Exception:
+                pass
+            x_start += icon_size + gap
+        # Footer text (address)
+        footer_text = 'BR, 4-5 Castle Court, London EC3V 9DL'
+        canvas.setFont('Helvetica', 8)
+        canvas.setFillColor(colors.HexColor('#606060'))
+        canvas.drawRightString(width - doc.rightMargin, y_footer + 0.02 * inch, footer_text)
+    # Build the document
+    doc.build(elements, onFirstPage=_header_footer, onLaterPages=_header_footer)
+    pdf_bytes = buffer.getvalue()
+    buffer.close()
+    return pdf_bytes
 
 
 def fetch_from_google_rss(query: str, limit: int = 20, *, hl: str | None = None, gl: str | None = None, ceid: str | None = None) -> List[Dict]:
@@ -677,8 +1046,8 @@ def run_monitoring(
         if not all_articles:
             st.warning("No articles were found for the specified queries.")
             return
-        # Scrape and update publication dates
-        scraped_results: List[Dict] = []
+        # Scrape full text, derive sentiment and assign tiers
+        enriched_results: List[Dict] = []
         for art in all_articles:
             url = art.get("url")
             # Use existing content if provided (should be rare with RSS)
@@ -694,14 +1063,23 @@ def run_monitoring(
                 else:
                     art["publishedAt"] = str(pub_date)
             art["content"] = text
-            scraped_results.append(art)
-        prioritised = prioritise_articles(scraped_results)
-        # Display results
+            # Sentiment analysis: use article body or description
+            sentiment_label, sentiment_score = compute_sentiment(text or art.get("description", ""))
+            art["sentiment"] = sentiment_label
+            art["sentiment_score"] = sentiment_score
+            # Tier classification based on source
+            source_name = art.get("source", {}).get("name", "")
+            art["tier"] = assign_tier(source_name) if source_name else None
+            enriched_results.append(art)
+        prioritised = prioritise_articles(enriched_results)
+        # Display results with selection options
         st.subheader("Results")
         if not prioritised:
             st.info("No articles were found for the specified queries.")
             return
         display_count = min(len(prioritised), max_articles)
+        # Collect selected articles indices in session state
+        selected_indices = []
         for idx, art in enumerate(prioritised[:display_count], start=1):
             title = art.get("title") or "Untitled article"
             source_name = art.get("source", {}).get("name", "Unknown source")
@@ -709,16 +1087,47 @@ def run_monitoring(
             with st.expander(header, expanded=False):
                 pub_date = art.get("publishedAt") or "Unknown date"
                 st.markdown(f"**Published:** {pub_date}")
-                # These scores may not be meaningful for RSS‑only results, but we keep them for sorting
+                # Display scoring metrics
                 st.markdown(
                     f"**Recency Score:** {round(art.get('recency', 0.0), 2)} | **Authority Score:** {round(art.get('authority', 0.0), 2)} | **Priority:** {round(art.get('priority', 0.0), 2)}"
                 )
+                # Display tier and sentiment (if available)
+                tier_label = art.get("tier") or "Unclassified"
+                sentiment_label = art.get("sentiment") or "N/A"
+                st.markdown(f"**Tier:** {tier_label} | **Sentiment:** {sentiment_label}")
                 description = art.get("description") or ""
                 content_excerpt = (art.get("content", "") or "")[:500]
                 snippet = description if description else content_excerpt
                 if snippet:
                     st.write(snippet.strip() + ("…" if len(snippet) >= 500 else ""))
                 st.markdown(f"[Read full article]({art.get('url')})")
+                # Checkbox for including in the PDF
+                include_key = f"include_{idx}"
+                include_default = art.get("tier") in {"Top", "Mid", "Trade"}
+                if st.checkbox("Include in report", value=include_default, key=include_key):
+                    selected_indices.append(idx - 1)
+        # Option to include sentiment column in PDF
+        include_sentiment = st.checkbox("Include sentiment column in report", value=False)
+        # Generate PDF button
+        if st.button("Generate PDF Report"):
+            # Gather selected articles by index
+            selected_articles = [prioritised[i] for i in selected_indices if prioritised[i].get("tier")]
+            if not selected_articles:
+                st.warning("No articles selected or none fall into the defined tiers.")
+            else:
+                pdf_bytes = generate_pdf_report(selected_articles, include_sentiment)
+                if pdf_bytes is None:
+                    st.error("Report generation failed: ReportLab may not be installed.")
+                else:
+                    # Construct file name based on current date
+                    date_tag = datetime.datetime.now().strftime("%Y-%m-%d")
+                    filename = f"press_coverage_report_{date_tag}.pdf"
+                    st.download_button(
+                        label="Download PDF",
+                        data=pdf_bytes,
+                        file_name=filename,
+                        mime="application/pdf",
+                    )
 
 
 if __name__ == "__main__":

@@ -9,96 +9,55 @@ requiring any coding knowledge.
 
 ## Features
 
-The current version of the media monitoring dashboard has been streamlined to
-prioritise ease of use and reliability.  It focuses on a single source of
-news, uses a robust multi‑stage scraper and presents results in a clean,
-Clippings‑style interface:
+This release focuses on simplicity and polish while adding deeper insights
+and professional report generation.  Key features include:
 
-* **Google News RSS search** – the app retrieves articles from the public
-  [Google News RSS](https://news.google.com/rss) feed for any keyword or
-  phrase.  You can restrict results to UK sources by enabling the “UK
-  coverage only” toggle on the home page.  Internally this sets the
-  appropriate `hl=en-GB`, `gl=GB` and `ceid=GB:en` parameters on the RSS
-  request.  The RSS format allows advanced operators such as `site:` and
-  `when:`【168391965472992†L183-L223】.  For example, entering `site:reuters.com AI
-  startups` searches for “AI startups” articles on Reuters only, while
-  `When:1d Beyonce` finds stories about Beyoncé from the past day.  See
-  Google’s operator reference for more ideas.
+* **Single search bar with UK toggle** – a streamlined interface lets you
+  type a topic, brand or person into one box and optionally restrict
+  coverage to UK publications.  Under the hood the app queries the public
+  [Google News RSS](https://news.google.com/rss) feed.  You can still
+  employ advanced operators such as `site:` and `when:`【168391965472992†L183-L223】 to
+  target specific outlets or date ranges.
 
-* **Full‑text scraping** – when the RSS feed does not contain the article
-  body, the app downloads each page and extracts the main content using a
-  series of extractors.  It first uses **newspaper3k**, falls back to
-  **goose3** when necessary【275271027204652†L203-L371】 and finally applies **readability‑lxml**
-  with BeautifulSoup【842996678366491†L94-L126】.  This multi‑stage approach
-  maximises the chance of obtaining readable text.
+* **Robust full‑text scraping** – when RSS entries lack article bodies, the
+  app retrieves the full page and extracts the main content using
+  **newspaper3k**, **goose3** and **readability‑lxml** in succession【275271027204652†L203-L371】【842996678366491†L94-L126】.
+  This multi‑extractor approach ensures that most articles are readable.
 
-* **Relevance and authority scoring** – each article receives a recency
-  score (fresh stories within seven days score highest) and a source
-  credibility score based on a curated list of reputable outlets.  The
-  News Literacy Project advises evaluating news sources based on standards,
-  transparency and corrections policies【559532761496453†L84-L109】; outlets like Reuters
-  and the BBC score highest in our heuristic.
+* **Relevance and authority scoring** – each story is scored for recency
+  (newer stories score higher) and source credibility.  The scoring
+  guidelines are inspired by the News Literacy Project’s recommendations
+  on evaluating standards, transparency and corrections policies【559532761496453†L84-L109】.
 
-* **Clean Streamlit dashboard** – the interface features a single
-  search bar inspired by the Clippings design.  Enter a topic, brand or
-  person, enable UK coverage if desired, and click *Search*.  Results are
-  displayed in expandable cards that show the headline, publication date,
-  recency and authority scores, a short excerpt and a link to the full
-  article.
+* **Sentiment analysis** – a lightweight sentiment model (VADER) analyses
+  each article’s text.  VADER is a lexicon‑ and rule‑based sentiment
+  analyser designed for social media and general text; it produces a
+  compound score from ‑1 (very negative) to 1 (very positive)【126899030742881†L284-L304】.
+  We convert this score into *positive*, *neutral* or *negative* labels and
+  display them alongside each article.  Sentiment can also be optionally
+  included in the generated PDF.
 
-* **Optional domain filtering via search syntax** – rather than exposing a
-  separate domain input, you can restrict results to specific outlets by
-  including their domains directly in the search query using the `site:`
-  operator (e.g., `site:bloomberg.com mergers and acquisitions`).  If you
-  wish to search multiple outlets, separate them with spaces (e.g.,
-  `site:reuters.com site:ft.com fintech`).  Behind the scenes the app uses
-  the Google News RSS feed with your exact search string, so all standard
-  operators are available【168391965472992†L183-L223】.
+* **Tier classification** – publications are grouped into **Top**, **Mid**
+  and **Trade/Industry** tiers based on their editorial reputation and
+  scope.  Major global outlets like Reuters and the Financial Times
+  comprise the Top tier; national papers such as The Times and The
+  Telegraph fall into Mid; and specialist titles like Mining Weekly and
+  Energy Voice are grouped under Trade.  Blogs and unknown sources are
+  excluded from reports to maintain quality.
 
-All results are deduplicated, scraped, scored and presented together.  The
-application no longer depends on external API keys, making setup much
-simpler.
-* **Full‑text scraping** – when an API does not provide full article text,
-  the app downloads the page and extracts the main body using a series of
-  fallbacks:
+* **Interactive selection and PDF report** – after performing a search,
+  results are displayed in expandable cards with checkboxes.  You can
+  choose which articles to include in a professionally styled PDF report.
+  The report reproduces the layout of the provided Word template: a
+  striking header image, a grey “Press Coverage” bar, the current date
+  and logo, grouped tables for each tier and a footer with contact
+  icons.  Reports are generated on demand via ReportLab and offered as
+  downloads.  A toggle lets you include the sentiment column in the
+  report if desired.
 
-  * **newspaper3k** – a widely used content extractor based on lxml’s HTML
-    cleaner.  It works on many mainstream news sites but may fail on some
-    layouts or when sites block scrapers.
-  * **goose3** – an Apache‑licensed extractor that returns the main body,
-    metadata and images【275271027204652†L203-L371】.  It serves as a second attempt
-    when newspaper3k does not return text.
-  * **readability‑lxml** – a Python port of the Readability algorithm that
-    extracts the main content from any web page【842996678366491†L94-L126】.  As a
-    final fallback, the app uses readability and then converts the HTML to
-    plain text using BeautifulSoup.  This ensures that most articles have at
-    least some extracted text.
-
-  Articles retrieved from The Guardian API already include the body text
-  (via the `show-fields=body` filter【555774334167872†L49-L53】) and therefore bypass
-  scraping.
-* **Relevance and authority scoring** – each article receives a recency score
-  (fresh stories within seven days score highest) and a source credibility
-  score based on a hand‑curated list of reputable news outlets.  The News
-  Literacy Project suggests looking for standards, transparency and
-  accountability when vetting a news source【559532761496453†L84-L109】; sources
-  such as Reuters, the Associated Press and the BBC rank highest.
-* **Clean Streamlit dashboard** – results are presented in expandable cards
-  inspired by the Clippings design.  Each card shows the headline,
-  publication date and scores, along with a short excerpt and a link to
-  the full article.
-* **Single search bar** – simply enter a topic, brand or person into the
-  search field on the home page.  There is no sidebar or slider.  Click
-  *Search* to fetch up to 20 articles.
-* **Domain filtering via search syntax** – you can focus on particular
-  outlets by using the `site:` operator directly in your search query, e.g.
-  `site:ft.com mergers` or `site:reuters.com site:bloomberg.com fintech`.  All
-  Google News operators are supported【168391965472992†L183-L223】.  There is no longer
-  a separate sidebar field for domains, making the interface cleaner.
-
-* **No API keys required** – the simplified application relies solely on
-  publicly available Google News RSS feeds.  You do not need to register
-  or supply any API keys.
+* **No API keys required** – all data is sourced from public RSS feeds, so
+  there are no secrets to manage.  Installation and deployment are
+  straightforward.
 
 ## Getting started locally
 
@@ -124,6 +83,12 @@ simpler.
    advanced operators like `site:reuters.com` or `when:3d` directly in the
    search bar to filter results.  Expand any result card to read an excerpt
    and follow the link to the full article.
+
+5. **Select articles and generate a PDF** – After running a search, tick
+   the “Include in report” boxes for the articles you wish to keep.
+   Optionally enable “Include sentiment column in report” and click
+   *Generate PDF Report*.  Once the report is ready you’ll see a
+   download button to save the PDF locally.
 
 ### Customising source authority
 

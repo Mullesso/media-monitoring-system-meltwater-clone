@@ -24,3 +24,19 @@ readability-lxml>=0.8.4
 # BeautifulSoup4 is used to convert HTML returned by readability-lxml and
 # the Guardian API into plain text for display.
 beautifulsoup4>=4.10.0
+
+# VADER sentiment analysis is a lexicon‑ and rule‑based tool specifically
+# attuned to sentiments expressed in social media and works well on other
+# textual domains【528669426112280†L32-L35】.  It provides compound scores in the
+# range [‑1, 1], which we use to derive positive, neutral and negative
+# categories【126899030742881†L284-L304】.
+vaderSentiment>=3.3.2
+
+# ReportLab is used to generate PDF reports styled after the provided Word
+# template.  It enables drawing images, tables and text on A4 pages.
+reportlab>=4.0.4
+
+# Pillow provides the Python Imaging Library required by ReportLab to
+# process images.  Although ReportLab can handle image files, Pillow is
+# installed as a dependency for robustness.
+Pillow>=9.5.0
